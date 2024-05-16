@@ -2,7 +2,7 @@
 """
 from elasticsearch.serializer import JSONSerializer
 
-class PYESSerializer(JSONSerializer):
+class CMRESSerializer(JSONSerializer):
     """ JSON serializer inherited from the elastic search JSON serializer
 
     Allows to serialize logs for a elasticsearch use.
@@ -16,6 +16,6 @@ class PYESSerializer(JSONSerializer):
         :params data: The data to serialize before sending it to elastic search
         """
         try:
-            return super(PYESSerializer, self).default(data)
+            return super(CMRESSerializer, self).default(data)
         except TypeError:
             return str(data)

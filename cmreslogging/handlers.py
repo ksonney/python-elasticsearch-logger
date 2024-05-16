@@ -8,7 +8,6 @@ from threading import Timer, Lock
 from enum import Enum
 from elasticsearch import helpers as eshelpers
 from elasticsearch import Elasticsearch
-from elasticsearch import client as esclient
 
 try:
     from requests_kerberos import HTTPKerberosAuth, DISABLED
@@ -22,10 +21,10 @@ try:
 except ImportError:
     AWS4AUTH_SUPPORTED = False
 
-from pyeslogging.serializers import PYESSerializer
+from cmreslogging.serializers import CMRESSerializer
 
 
-class PYESHandler(logging.Handler):
+class CMRESHandler(logging.Handler):
     """ Elasticsearch log handler
 
     Allows to log to elasticsearch into json format.
@@ -54,16 +53,19 @@ class PYESHandler(logging.Handler):
         - Weekly indices
         - Monthly indices
         - Year indices
+        - Disabled/No rotation - use this for Datastreams
         """
         DAILY = 0
         WEEKLY = 1
         MONTHLY = 2
         YEARLY = 3
+        DISABLE = 5
 
     # Defaults for the class
     __DEFAULT_ELASTICSEARCH_HOST = [{'host': 'localhost', 'port': 9200}]
     __DEFAULT_AUTH_USER = ''
     __DEFAULT_AUTH_PASSWD = ''
+    __DEFAULT_AUTH_API_KEY = ''
     __DEFAULT_AWS_ACCESS_KEY = ''
     __DEFAULT_AWS_SECRET_KEY = ''
     __DEFAULT_AWS_REGION = ''
@@ -88,7 +90,7 @@ class PYESHandler(logging.Handler):
     def _get_daily_index_name(es_index_name):
         """ Returns elasticearch index name
         :param: index_name the prefix to be used in the index
-        :return: A srting containing the elasticsearch indexname used which should include the date.
+        :return: A string containing the elasticsearch indexname used which should include the date.
         """
         return "{0!s}-{1!s}".format(es_index_name, datetime.datetime.now().strftime('%Y.%m.%d'))
 
@@ -96,7 +98,7 @@ class PYESHandler(logging.Handler):
     def _get_weekly_index_name(es_index_name):
         """ Return elasticsearch index name
         :param: index_name the prefix to be used in the index
-        :return: A srting containing the elasticsearch indexname used which should include the date and specific week
+        :return: A string containing the elasticsearch indexname used which should include the date and specific week
         """
         current_date = datetime.datetime.now()
         start_of_the_week = current_date - datetime.timedelta(days=current_date.weekday())
@@ -106,7 +108,7 @@ class PYESHandler(logging.Handler):
     def _get_monthly_index_name(es_index_name):
         """ Return elasticsearch index name
         :param: index_name the prefix to be used in the index
-        :return: A srting containing the elasticsearch indexname used which should include the date and specific moth
+        :return: A string containing the elasticsearch indexname used which should include the date and specific moth
         """
         return "{0!s}-{1!s}".format(es_index_name, datetime.datetime.now().strftime('%Y.%m'))
 
@@ -114,20 +116,30 @@ class PYESHandler(logging.Handler):
     def _get_yearly_index_name(es_index_name):
         """ Return elasticsearch index name
         :param: index_name the prefix to be used in the index
-        :return: A srting containing the elasticsearch indexname used which should include the date and specific year
+        :return: A string containing the elasticsearch indexname used which should include the date and specific year
         """
         return "{0!s}-{1!s}".format(es_index_name, datetime.datetime.now().strftime('%Y'))
 
+    @staticmethod
+    def _get_base_index_name(es_index_name):
+        """ Return elasticsearch index name
+        :param: index_name the prefix to be used in the index
+        :return: A string containing the elasticsearch indexname 
+        """
+        return es_index_name
+    
     _INDEX_FREQUENCY_FUNCION_DICT = {
         IndexNameFrequency.DAILY: _get_daily_index_name,
         IndexNameFrequency.WEEKLY: _get_weekly_index_name,
         IndexNameFrequency.MONTHLY: _get_monthly_index_name,
-        IndexNameFrequency.YEARLY: _get_yearly_index_name
+        IndexNameFrequency.YEARLY: _get_yearly_index_name,
+        IndexNameFrequency.DISABLE: _get_base_index_name
     }
 
     def __init__(self,
                  hosts=__DEFAULT_ELASTICSEARCH_HOST,
                  auth_details=(__DEFAULT_AUTH_USER, __DEFAULT_AUTH_PASSWD),
+                 auth_apikey=__DEFAULT_AUTH_API_KEY,
                  aws_access_key=__DEFAULT_AWS_ACCESS_KEY,
                  aws_secret_key=__DEFAULT_AWS_SECRET_KEY,
                  aws_region=__DEFAULT_AWS_REGION,
@@ -147,17 +159,19 @@ class PYESHandler(logging.Handler):
         :param hosts: The list of hosts that elasticsearch clients will connect. The list can be provided
                     in the format ```[{'host':'host1','port':9200}, {'host':'host2','port':9200}]``` to
                     make sure the client supports failover of one of the instertion nodes
-        :param auth_details: When ```PYESHandler.AuthType.BASIC_AUTH``` is used this argument must contain
+        :param auth_details: When ```CMRESHandler.AuthType.BASIC_AUTH``` is used this argument must contain
                     a tuple of string with the user and password that will be used to authenticate against
                     the Elasticsearch servers, for example```('User','Password')
-        :param aws_access_key: When ```PYESHandler.AuthType.AWS_SIGNED_AUTH``` is used this argument must contain
+        :param auth_apikey: When ```CMSRESHandlet.AuthType.API_KEY``` is used this argument must contain
+                    a string with the API Key used to authenticate against the Elasticsearch Servers
+        :param aws_access_key: When ```CMRESHandler.AuthType.AWS_SIGNED_AUTH``` is used this argument must contain
                     the AWS key id of the  the AWS IAM user
-        :param aws_secret_key: When ```PYESHandler.AuthType.AWS_SIGNED_AUTH``` is used this argument must contain
+        :param aws_secret_key: When ```CMRESHandler.AuthType.AWS_SIGNED_AUTH``` is used this argument must contain
                     the AWS secret key of the  the AWS IAM user
-        :param aws_region: When ```PYESHandler.AuthType.AWS_SIGNED_AUTH``` is used this argument must contain
+        :param aws_region: When ```CMRESHandler.AuthType.AWS_SIGNED_AUTH``` is used this argument must contain
                     the AWS region of the  the AWS Elasticsearch servers, for example```'us-east'
-        :param auth_type: The authentication type to be used in the connection ```PYESHandler.AuthType```
-                    Currently, NO_AUTH, BASIC_AUTH, KERBEROS_AUTH are supported
+        :param auth_type: The authentication type to be used in the connection ```CMRESHandler.AuthType```
+                    Currently, NO_AUTH, BASIC_AUTH, KERBEROS_AUTH, API_KEY are supported
         :param use_ssl: A boolean that defines if the communications should use SSL encrypted communication
         :param verify_ssl: A boolean that defines if the SSL certificates are validated or not
         :param buffer_size: An int, Once this size is reached on the internal buffer results are flushed into ES
@@ -167,20 +181,21 @@ class PYESHandler(logging.Handler):
                     date with YYYY.MM.dd, ```python_logger``` used by default
         :param index_name_frequency: Defines what the date used in the postfix of the name would be. available values
                     are selected from the IndexNameFrequency class (IndexNameFrequency.DAILY,
-                    IndexNameFrequency.WEEKLY, IndexNameFrequency.MONTHLY, IndexNameFrequency.YEARLY). By default
-                    it uses daily indices.
+                    IndexNameFrequency.WEEKLY, IndexNameFrequency.MONTHLY, IndexNameFrequency.YEARLY, IndexNameFrequency.DISABLE). 
+                    By default it uses daily indices.
         :param es_doc_type: A string with the name of the document type that will be used ```python_log``` used
                     by default
         :param es_additional_fields: A dictionary with all the additional fields that you would like to add
                     to the logs, such the application, environment, etc.
         :param raise_on_indexing_exceptions: A boolean, True only for debugging purposes to raise exceptions
                     caused when
-        :return: A ready to be used PYESHandler.
+        :return: A ready to be used CMRESHandler.
         """
         logging.Handler.__init__(self)
 
         self.hosts = hosts
         self.auth_details = auth_details
+        self.auth_apikey = auth_apikey
         self.aws_access_key = aws_access_key
         self.aws_secret_key = aws_secret_key
         self.aws_region = aws_region
@@ -193,8 +208,8 @@ class PYESHandler(logging.Handler):
         self.index_name_frequency = index_name_frequency
         self.es_doc_type = es_doc_type
         self.es_additional_fields = es_additional_fields.copy()
-        self.es_additional_fields.update({'host': socket.gethostname(),
-                                          'host_ip': socket.gethostbyname(socket.gethostname())})
+        # self.es_additional_fields.update({'host': socket.gethostname(),
+        #                                   'host_ip': socket.gethostbyname(socket.gethostname())})
         self.raise_on_indexing_exceptions = raise_on_indexing_exceptions
         self.default_timestamp_field_name = default_timestamp_field_name
 
@@ -202,8 +217,8 @@ class PYESHandler(logging.Handler):
         self._buffer = []
         self._buffer_lock = Lock()
         self._timer = None
-        self._index_name_func = PYESHandler._INDEX_FREQUENCY_FUNCION_DICT[self.index_name_frequency]
-        self.serializer = PYESSerializer()
+        self._index_name_func = CMRESHandler._INDEX_FREQUENCY_FUNCION_DICT[self.index_name_frequency]
+        self.serializer = CMRESSerializer()
 
     def __schedule_flush(self):
         if self._timer is None:
@@ -212,7 +227,7 @@ class PYESHandler(logging.Handler):
             self._timer.start()
 
     def __get_es_client(self):
-        if self.auth_type == PYESHandler.AuthType.NO_AUTH:
+        if self.auth_type == CMRESHandler.AuthType.NO_AUTH:
             if self._client is None:
                 self._client = Elasticsearch(hosts=self.hosts,
                                              use_ssl=self.use_ssl,
@@ -220,24 +235,22 @@ class PYESHandler(logging.Handler):
                                              serializer=self.serializer)
             return self._client
 
-        if self.auth_type == PYESHandler.AuthType.BASIC_AUTH:
+        if self.auth_type == CMRESHandler.AuthType.BASIC_AUTH:
             if self._client is None:
                 return Elasticsearch(hosts=self.hosts,
                                      http_auth=self.auth_details,
-                                     use_ssl=self.use_ssl,
                                      verify_certs=self.verify_certs,
                                      serializer=self.serializer)
             return self._client
-        if self.auth_type == PYESHandler.AuthType.API_KEY:
+        if self.auth_type == CMRESHandler.AuthType.API_KEY:
             if self._client is None:
                 return Elasticsearch(hosts=self.hosts,
-                                     api_key=self.auth_details,
-                                     use_ssl=self.use_ssl,
+                                     api_key=self.auth_apikey,
                                      verify_certs=self.verify_certs,
                                      serializer=self.serializer)
             return self._client
             
-        if self.auth_type == PYESHandler.AuthType.KERBEROS_AUTH:
+        if self.auth_type == CMRESHandler.AuthType.KERBEROS_AUTH:
             if not CMR_KERBEROS_SUPPORTED:
                 raise EnvironmentError("Kerberos module not available. Please install \"requests-kerberos\"")
             # For kerberos we return a new client each time to make sure the tokens are up to date
@@ -247,7 +260,7 @@ class PYESHandler(logging.Handler):
                                  http_auth=HTTPKerberosAuth(mutual_authentication=DISABLED),
                                  serializer=self.serializer)
 
-        if self.auth_type == PYESHandler.AuthType.AWS_SIGNED_AUTH:
+        if self.auth_type == CMRESHandler.AuthType.AWS_SIGNED_AUTH:
             if not AWS4AUTH_SUPPORTED:
                 raise EnvironmentError("AWS4Auth not available. Please install \"requests-aws4auth\"")
             if self._client is None:
@@ -290,10 +303,14 @@ class PYESHandler(logging.Handler):
         if self._timer is not None and self._timer.is_alive():
             self._timer.cancel()
         self._timer = None
-        idxclient = esclient.IndicesClient(self.__get_es_client())
-        if idxclient.exists(index=self._index_name_func.__func__(self.es_index_name)) == False:
-            idxclient.create_data_stream(name=self._index_name_func.__func__(self.es_index_name))
-                
+        try:
+            # If index does not exist, explicitly
+            if self.__get_es_client().indices.exists(index=self._index_name_func.__func__(self.es_index_name)) == False:
+                self.__get_es_client().indices.create(index=self._index_name_func.__func__(self.es_index_name))
+        except Exception as exception:
+            if self.raise_on_indexing_exceptions:
+                raise exception
+
         if self._buffer:
             try:
                 with self._buffer_lock:
@@ -302,7 +319,6 @@ class PYESHandler(logging.Handler):
                 actions = (
                     {
                         '_index': self._index_name_func.__func__(self.es_index_name),
-                        '_type': self.es_doc_type,
                         '_source': log_record
                     }
                     for log_record in logs_buffer
@@ -337,7 +353,7 @@ class PYESHandler(logging.Handler):
 
         rec = self.es_additional_fields.copy()
         for key, value in record.__dict__.items():
-            if key not in PYESHandler.__LOGGING_FILTER_FIELDS:
+            if key not in CMRESHandler.__LOGGING_FILTER_FIELDS:
                 if key == "args":
                     value = tuple(str(arg) for arg in value)
                 rec[key] = "" if value is None else value
