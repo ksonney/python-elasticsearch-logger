@@ -29,12 +29,12 @@ if sys.version_info <= (3,4):
 print("List of dependencies : {0}".format(str(dependencies)))
 
 setup(
-    name='CMRESHandler',
+    name='PYESHandler',
 
     # Versions should comply with PEP440.  For a discussion on single-sourcing
     # the version across setup.py and the project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
-    version='1.0.0',
+    version='1.0.3',
 
     description='Elasticsearch Log handler for the logging library',
     long_description=long_description,
