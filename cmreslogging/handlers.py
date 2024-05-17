@@ -3,11 +3,11 @@
 
 import logging
 import datetime
-import socket
 from threading import Timer, Lock
 from enum import Enum
 from elasticsearch import helpers as eshelpers
 from elasticsearch import Elasticsearch
+import json
 
 try:
     from requests_kerberos import HTTPKerberosAuth, DISABLED
@@ -86,6 +86,9 @@ class CMRESHandler(logging.Handler):
                                'levelno',
                                'created']
 
+    __DEFAULT_INDEX_LIFECYCLE = json.loads('{"phases": {"hot": {"min_age": "0ms","actions": {"rollover": {"max_age": "30d","max_primary_shard_size": "50gb"}}},"delete": {"min_age": "60d","actions": {"delete": {"delete_searchable_snapshot": true}}}}}')
+    __DEFAULT_INDEX_LC_COMPONENT = json.loads('{"settings":{"index.lifecycle.name":"pylog_handler_policy"}}')
+    __DEFAULT_INDEX_MAPPING_COMPONENT = json.loads('{"settings": {"index": {"number_of_shards": "1","mapping": {"total_fields": {"limit": "2500"}}}}, "mappings": { "dynamic": true,"numeric_detection": false,"date_detection": true,"dynamic_date_formats": ["strict_date_optional_time","yyyy/MM/dd HH:mm:ss Z||yyyy/MM/dd Z"], "properties":{"exc_info":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"exc_text":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"filename":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"funcName":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"levelname":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"lineno":{"type":"long"},"message":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"module":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"msg":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"name":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"pathname":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"process":{"type":"long"},"processName":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"stack_info":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"thread":{"type":"long"},"threadName":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}},"timestamp":{"type":"date"}}}}')
     @staticmethod
     def _get_daily_index_name(es_index_name):
         """ Returns elasticearch index name
@@ -127,7 +130,7 @@ class CMRESHandler(logging.Handler):
         :return: A string containing the elasticsearch indexname 
         """
         return es_index_name
-    
+
     _INDEX_FREQUENCY_FUNCION_DICT = {
         IndexNameFrequency.DAILY: _get_daily_index_name,
         IndexNameFrequency.WEEKLY: _get_weekly_index_name,
@@ -153,8 +156,11 @@ class CMRESHandler(logging.Handler):
                  es_doc_type=__DEFAULT_ES_DOC_TYPE,
                  es_additional_fields=__DEFAULT_ADDITIONAL_FIELDS,
                  raise_on_indexing_exceptions=__DEFAULT_RAISE_ON_EXCEPTION,
-                 default_timestamp_field_name=__DEFAULT_TIMESTAMP_FIELD_NAME):
-        """ Handler constructor
+                 default_timestamp_field_name=__DEFAULT_TIMESTAMP_FIELD_NAME,
+                 default_ilm_policy=__DEFAULT_INDEX_LIFECYCLE,
+                 default_index_mapping=__DEFAULT_INDEX_MAPPING_COMPONENT
+                 ):
+        """Handler constructor
 
         :param hosts: The list of hosts that elasticsearch clients will connect. The list can be provided
                     in the format ```[{'host':'host1','port':9200}, {'host':'host2','port':9200}]``` to
@@ -181,14 +187,18 @@ class CMRESHandler(logging.Handler):
                     date with YYYY.MM.dd, ```python_logger``` used by default
         :param index_name_frequency: Defines what the date used in the postfix of the name would be. available values
                     are selected from the IndexNameFrequency class (IndexNameFrequency.DAILY,
-                    IndexNameFrequency.WEEKLY, IndexNameFrequency.MONTHLY, IndexNameFrequency.YEARLY, IndexNameFrequency.DISABLE). 
-                    By default it uses daily indices.
+                    IndexNameFrequency.WEEKLY, IndexNameFrequency.MONTHLY, IndexNameFrequency.YEARLY, IndexNameFrequency.DISABLE).
+                    DISABLED will create and use a datastream if the index does not exist. By default it uses daily indices.
         :param es_doc_type: A string with the name of the document type that will be used ```python_log``` used
                     by default
         :param es_additional_fields: A dictionary with all the additional fields that you would like to add
                     to the logs, such the application, environment, etc.
         :param raise_on_indexing_exceptions: A boolean, True only for debugging purposes to raise exceptions
                     caused when
+        :param default_ilm_policy: A json string representing the default ILM Policy. Default is to keep data in the hot tier for
+                    30 days and delete after 60 days
+        :param default_index_mapping: A json string representing the field mappings for the index. Default is fairly generic,
+                    and has dynamic mapping enabled.
         :return: A ready to be used CMRESHandler.
         """
         logging.Handler.__init__(self)
@@ -208,10 +218,10 @@ class CMRESHandler(logging.Handler):
         self.index_name_frequency = index_name_frequency
         self.es_doc_type = es_doc_type
         self.es_additional_fields = es_additional_fields.copy()
-        # self.es_additional_fields.update({'host': socket.gethostname(),
-        #                                   'host_ip': socket.gethostbyname(socket.gethostname())})
         self.raise_on_indexing_exceptions = raise_on_indexing_exceptions
         self.default_timestamp_field_name = default_timestamp_field_name
+        self.default_ilm_policy = default_ilm_policy
+        self.default_index_mapping = default_index_mapping
 
         self._client = None
         self._buffer = []
@@ -249,7 +259,7 @@ class CMRESHandler(logging.Handler):
                                      verify_certs=self.verify_certs,
                                      serializer=self.serializer)
             return self._client
-            
+
         if self.auth_type == CMRESHandler.AuthType.KERBEROS_AUTH:
             if not CMR_KERBEROS_SUPPORTED:
                 raise EnvironmentError("Kerberos module not available. Please install \"requests-kerberos\"")
@@ -296,6 +306,39 @@ class CMRESHandler(logging.Handler):
         current_date = datetime.datetime.utcfromtimestamp(timestamp)
         return "{0!s}.{1:03d}Z".format(current_date.strftime('%Y-%m-%dT%H:%M:%S'), int(current_date.microsecond / 1000))
 
+    def __create_datastream_or_index(self):
+        es_client = self.__get_es_client()
+        idx_name=self._index_name_func.__func__(self.es_index_name)
+        # If index does not exist, explicitly create it as a data stream (ES7.X and higher)
+        if es_client.indices.exists(index=idx_name) == False:
+            if self.index_name_frequency == self.IndexNameFrequency.DISABLE:
+                try:
+                    es_client.ilm.put_lifecycle(
+                        name="pylog_handler_policy",
+                        policy=self.default_ilm_policy
+                    )
+                    es_client.cluster.put_component_template(
+                        name="mappings@pylog",
+                        template=self.default_index_mapping,
+                    )
+                    es_client.cluster.put_component_template(
+                        name="lifecycle@pylog",
+                        template=self.__DEFAULT_INDEX_LC_COMPONENT,
+                    )
+                    es_client.indices.put_index_template(
+                        name="python_log_template",
+                        index_patterns=[idx_name+"*"],
+                        data_stream={},
+                        composed_of=["mappings@pylog", "lifecycle@pylog"]
+                    )
+                    es_client.indices.create_data_stream(name=idx_name)
+                except Exception as exception:
+                    print("Error: Unable to create datastream\n Reason:",exception)
+                    print("Falling back to a standard index")
+                    es_client.indices.create(index=idx_name)
+            else:
+                es_client.indices.create(index=idx_name)
+
     def flush(self):
         """ Flushes the buffer into ES
         :return: None
@@ -303,33 +346,30 @@ class CMRESHandler(logging.Handler):
         if self._timer is not None and self._timer.is_alive():
             self._timer.cancel()
         self._timer = None
-        try:
-            # If index does not exist, explicitly
-            if self.__get_es_client().indices.exists(index=self._index_name_func.__func__(self.es_index_name)) == False:
-                self.__get_es_client().indices.create(index=self._index_name_func.__func__(self.es_index_name))
-        except Exception as exception:
-            if self.raise_on_indexing_exceptions:
-                raise exception
-
+        self.__create_datastream_or_index()
         if self._buffer:
             try:
                 with self._buffer_lock:
                     logs_buffer = self._buffer
                     self._buffer = []
-                actions = (
-                    {
-                        '_index': self._index_name_func.__func__(self.es_index_name),
-                        '_source': log_record
-                    }
-                    for log_record in logs_buffer
-                )
+                actions=[]
+                for log_record in logs_buffer:
+                    log_record["args"]=str(log_record["args"])
+                    log_record["msg"] = str(log_record["msg"])
+                    log_record["@timestamp"]=str(log_record["timestamp"])
+                    actions.append({"_op_type":"create","_index": self._index_name_func.__func__(self.es_index_name), "_source": log_record})
                 eshelpers.bulk(
                     client=self.__get_es_client(),
+                    index=self._index_name_func.__func__(self.es_index_name),
                     actions=actions,
-                    stats_only=True
                 )
+            except eshelpers.BulkIndexError as e:
+                print("Exception:", e)
+                for err in e.errors:
+                    print("Error:", err)
             except Exception as exception:
                 if self.raise_on_indexing_exceptions:
+                    print("Error: %s\n", exception)
                     raise exception
 
     def close(self):
