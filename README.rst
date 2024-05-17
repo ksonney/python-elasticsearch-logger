@@ -19,7 +19,7 @@ TODO
 Thanks
 ******
  - Carlos Mandanedo Rueda for his inital work on this module
- - 
+ - Tomasz Hoscilo for the upated and maintained version of this module
 
 Python Elasticsearch Log handler
 ********************************
@@ -192,7 +192,8 @@ Contributing back
 -----------------
 Feel free to use this as is or even better, feel free to fork and send your pull requests over.
 
-
+Original Links
+--------------
 .. |downloads| image:: https://img.shields.io/pypi/dd/CMRESHandler.svg
     :target: https://pypi.python.org/pypi/CMRESHandler
     :alt: Daily PyPI downloads
