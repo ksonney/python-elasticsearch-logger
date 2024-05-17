@@ -10,15 +10,25 @@ PYESHandler.py
 **Note: Maintainers needed : Those that committed in the past code to this repo or are presenting new PRs and have experience and interest on helping to maintain repos & python libraries (code quality, testing, integration, etc). If you are intereted on getting our PR's through and helping others to contribute to the library, please get in touch.**
 
 
+TODO
+****
+ - Document new initialization parameters
+ - Fix Creation of Datastreams on Elastic Serverless
+ - Test on Python 2, or just drop support altogether
+
+Thanks
+******
+ - Carlos Mandanedo Rueda for his inital work on this module
+ - 
+
 Python Elasticsearch Log handler
 ********************************
 
 This library provides an Elasticsearch logging appender compatible with the
 python standard `logging <https://docs.python.org/2/library/logging.html>`_ library.
 
-The code source is in github at `https://github.com/cmanaha/python-elasticsearch-logger
-<https://github.com/cmanaha/python-elasticsearch-logger>`_
-
+The code source is in github at `https://github.com/ksonney/python-elasticsearch-logger
+<https://github.com/ksonney/python-elasticsearch-logger>`_
 
 Installation
 ============
@@ -32,13 +42,14 @@ This library requires the following dependencies
  - elasticsearch
  - requests
  - enum
-
+ - json
 
 Requirements Python 3
 =====================
 This library requires the following dependencies
  - elasticsearch
  - requests
+ - json
 
 Additional requirements for Kerberos support
 ============================================
